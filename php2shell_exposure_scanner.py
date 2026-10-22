@@ -12,14 +12,25 @@ WHAT IT DOES
     targets, enumerates web hosts and fingerprints the PHP version exposed by
     each one, then grades every host:
 
-        VULNERABLE  — exposed PHP version is below the fixed version for its
-                      branch (8.2.35 / 8.3.36 / 8.4.27 / 8.5.12).
-        EOL         — unmaintained branch (7.x–8.1): no official branch fix.
-        PATCHED     — exposed version is at or above the fixed version.
-        INDETERMINATE — PHP detected but version hidden, or no PHP banner.
+        LIKELY_EXPOSED      — exposed PHP version is below the UPSTREAM fixed
+                              version for its branch (8.2.35 / 8.3.36 / 8.4.27 /
+                              8.5.12). See the backport caveat below.
+        LIKELY_EXPOSED_EOL  — unmaintained branch (7.x–8.1): no official fix.
+        PATCHED             — exposed version is at or above the upstream fix.
+        INDETERMINATE       — PHP detected but version hidden, or no PHP banner.
 
     Each verdict carries a CONFIDENCE level (confirmed / likely / possible /
     none) so you never get a binary verdict that over-promises.
+
+IMPORTANT — WHY "LIKELY", NOT "VULNERABLE"
+    This tool reads the version string a server advertises. Linux distributions
+    (Debian, Ubuntu, RHEL, …) routinely BACKPORT security fixes WITHOUT bumping
+    the upstream version number: a Debian host showing "PHP/8.2.28" may already
+    carry the fix in package revision 8.2.28-1+debXuY, invisible over HTTP.
+    A LIKELY_EXPOSED verdict therefore means "running an outdated upstream
+    version — confirm the distro package", NOT "confirmed vulnerable". This is
+    exactly why version-only scanners produce false positives; verify hits
+    out-of-band before acting.
 
 DETECTION PHILOSOPHY — SAFE BY DESIGN
     This scanner fingerprints only. It NEVER tries to trigger the out-of-memory
@@ -83,8 +94,8 @@ EOL_BRANCHES = {(5, 4), (5, 5), (5, 6),
 # ---------------------------------------------------------------------------
 # Verdicts and confidence levels
 # ---------------------------------------------------------------------------
-VULN = "VULNERABLE"
-EOL = "VULNERABLE_EOL"
+VULN = "LIKELY_EXPOSED"
+EOL = "LIKELY_EXPOSED_EOL"
 PATCHED = "PATCHED"
 INDET = "INDETERMINATE"
 
@@ -312,12 +323,14 @@ async def probe(ip, port, scheme, timeout, check_phpinfo):
     phpinfo_ver = None
     if check_phpinfo:
         pi = await _raw_request(ip, port, scheme, "GET", "/phpinfo.php", timeout)
-        if pi and pi[0] == 200 and "phpinfo()" in pi[3].lower() or \
-           (pi and pi[0] == 200 and PHPINFO_VER_RE.search(pi[3])):
-            m = PHPINFO_VER_RE.search(pi[3])
-            if m:
-                phpinfo_ver = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
-                r.evidence.append("exposed /phpinfo.php")
+        if pi and pi[0] == 200:
+            pi_body = pi[3]
+            if "phpinfo()" in pi_body.lower() or PHPINFO_VER_RE.search(pi_body):
+                m = PHPINFO_VER_RE.search(pi_body)
+                if m:
+                    phpinfo_ver = (int(m.group(1)), int(m.group(2)),
+                                   int(m.group(3)))
+                    r.evidence.append("exposed /phpinfo.php")
 
     classify(r, body=body, phpinfo_ver=phpinfo_ver)
     return r
@@ -331,10 +344,11 @@ def _grade_version(major, minor, patch):
     if branch in FIXED_BY_BRANCH:
         fx = FIXED_BY_BRANCH[branch]
         if (major, minor, patch) >= fx:
-            return PATCHED, f">= {fx[0]}.{fx[1]}.{fx[2]} (fixed)"
-        return VULN, f"< {fx[0]}.{fx[1]}.{fx[2]} (CVE-2026-109618/109619)"
+            return PATCHED, f">= {fx[0]}.{fx[1]}.{fx[2]} upstream (fixed)"
+        return VULN, (f"upstream < {fx[0]}.{fx[1]}.{fx[2]} — confirm distro "
+                      f"backport (CVE-2026-109618/109619)")
     if branch in EOL_BRANCHES:
-        return EOL, "unmaintained branch — vulnerable unless source-backported"
+        return EOL, "unmaintained branch — exposed unless source-backported"
     return INDET, "branch outside reference set — verify manually"
 
 
@@ -509,13 +523,17 @@ def write_html(results, path, meta):
 <th>Evidence</th><th>Detail</th></tr></thead><tbody>
 {''.join(tr)}
 </tbody></table>
-<p class="note">Non-destructive scan: version read from HTTP banners / cookies /
-error pages only. An <b>INDETERMINATE</b> + <i>possible</i> row means PHP is
-present but its version is hidden — treat as potentially exposed and confirm
-out-of-band (server access, <code>php -v</code>). This tool never triggers the
-OOM condition and sends no exploitation traffic. Fixed versions: 8.2.35 /
-8.3.36 / 8.4.27 / 8.5.12. Credits: Calif, OpenAI, Wiz (discovery); PHP
-Foundation (fix); Searchlight Cyber (detection research).</p>
+<p class="note"><b>Read before acting.</b> This is a non-destructive scan:
+the PHP version is read from HTTP banners / cookies / error pages only, and the
+tool never triggers the OOM condition or sends exploitation traffic.
+<b>LIKELY_EXPOSED</b> means the host advertises a PHP version below the upstream
+fix — but Linux distributions backport fixes without changing the version
+string, so a Debian/Ubuntu/RHEL host may already be patched. Always confirm a
+hit out-of-band (distro package revision, <code>php -v</code>) before reporting
+it. An <b>INDETERMINATE</b> + <i>possible</i> row means PHP is present but its
+version is hidden — treat as potentially exposed, not safe. Upstream fixed
+versions: 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12. Credits: Calif, OpenAI, Wiz
+(discovery); PHP Foundation (fix); Searchlight Cyber (detection research).</p>
 </div></body></html>"""
     with open(path, "w", encoding="utf-8") as f:
         f.write(html)
@@ -528,8 +546,9 @@ def print_summary(results):
     print("\n" + "=" * 64)
     print("SUMMARY")
     print("=" * 64)
-    labels = [(VULN, "VULNERABLE"), (EOL, "VULNERABLE (EOL branch)"),
-              (INDET, "INDETERMINATE"), (PATCHED, "PATCHED")]
+    labels = [(VULN, "LIKELY EXPOSED (outdated)"),
+              (EOL, "LIKELY EXPOSED (EOL branch)"),
+              (INDET, "INDETERMINATE"), (PATCHED, "UP TO DATE (upstream)")]
     for key, label in labels:
         items = buckets.get(key, [])
         if not items:
@@ -543,7 +562,7 @@ def print_summary(results):
     hot = buckets.get(VULN, []) + buckets.get(EOL, [])
     poss = [r for r in buckets.get(INDET, []) if r.confidence == CONF_POSSIBLE]
     if hot:
-        print("\nPRIORITY (confirmed exposure):")
+        print("\nPRIORITY (outdated upstream — confirm distro backport):")
         for r in sorted(hot, key=lambda x: x.ip):
             print(f"  {r.url:30} PHP {r.php_version or '?':9} [{r.confidence}] {r.detail}")
     if poss:
@@ -690,8 +709,10 @@ def main():
         print(f"[+] JSONL: {args.jsonl}")
 
     print(f"\n[*] Done in {time.time()-t0:.1f}s. {len(results)} web responses.")
-    print("[i] Reminder: INDETERMINATE is not 'safe'. Confirm sensitive hosts "
-          "out-of-band (server access, `php -v`, asset inventory).")
+    print("[i] Reminder: LIKELY_EXPOSED = outdated upstream version, NOT "
+          "confirmed vulnerable — distro backports are invisible over HTTP. "
+          "INDETERMINATE is not 'safe'. Confirm hits out-of-band "
+          "(distro package, `php -v`, asset inventory) before reporting.")
 
 
 if __name__ == "__main__":

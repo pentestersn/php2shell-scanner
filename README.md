@@ -9,14 +9,23 @@ critical PHP remote-code-execution vulnerabilities disclosed in the
 **without ever triggering the crash the real exploit relies on.**
 
 ```
-VULNERABLE      PHP < 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12
-VULNERABLE_EOL  unmaintained branch (7.x–8.1): no official branch fix
-PATCHED         at or above the fixed version for its branch
-INDETERMINATE   PHP present but version hidden, or no PHP banner at all
+LIKELY_EXPOSED      PHP below upstream fix (8.2.35 / 8.3.36 / 8.4.27 / 8.5.12)
+LIKELY_EXPOSED_EOL  unmaintained branch (7.x–8.1): no official branch fix
+PATCHED             at or above the upstream fix for its branch
+INDETERMINATE       PHP present but version hidden, or no PHP banner at all
 ```
 
 Every verdict carries a **confidence level** (`confirmed` / `possible` / `none`)
 so you never get a binary answer that over-promises.
+
+> ⚠️ **It says `LIKELY_EXPOSED`, not `VULNERABLE`, on purpose.** The tool reads
+> the version a server advertises. Linux distributions (Debian, Ubuntu, RHEL…)
+> backport security fixes **without changing the version string**, so a host
+> showing `PHP/8.2.28` may already be patched via its distro package. A
+> `LIKELY_EXPOSED` verdict means *"running an outdated upstream version —
+> confirm the distro package"*, **not** *"confirmed vulnerable"*. This is why
+> version-only scanners produce false positives. Always verify a hit
+> out-of-band before acting on it. See [Known limitations](#known-limitations).
 
 ---
 
@@ -57,7 +66,7 @@ sign-off in your rules of engagement — not this tool against a whole range.
 No dependencies. Python 3.8+ standard library only.
 
 ```bash
-git clone https://github.com/pentestersn/php2shell-scanner.git
+git clone https://github.com/<your-user>/php2shell-scanner.git
 cd php2shell-scanner
 python3 php2shell_exposure_scanner.py --help
 ```
@@ -111,9 +120,9 @@ A result row looks like:
 
 ```json
 {"ip":"203.0.113.10","port":443,"scheme":"https","status":200,
- "php_version":"8.3.30","verdict":"VULNERABLE","confidence":"confirmed",
+ "php_version":"8.3.30","verdict":"LIKELY_EXPOSED","confidence":"confirmed",
  "evidence":["version in HTTP banner"],
- "detail":"< 8.3.36 (CVE-2026-109618/109619)"}
+ "detail":"upstream < 8.3.36 — confirm distro backport (CVE-2026-109618/109619)"}
 ```
 
 ---
@@ -139,6 +148,35 @@ Fixed versions (PHP Security Release, 21 Oct 2026):
 > Remote mod_php vs PHP-FPM detection is unreliable, so this tool does not claim
 > it. The advisory rates the risk highest for Apache mod_php, where an
 > unauthenticated request can trigger the bug before any application code runs.
+
+---
+
+## Known limitations
+
+Be upfront about these — they are inherent to **any** banner-based scanner, and
+knowing them is what separates triage from a false alarm.
+
+- **Distro backports cause false positives.** This is the big one. Debian,
+  Ubuntu and RHEL ship security fixes in their own package revisions
+  (`8.2.28-1+debXuY`) *without* bumping the upstream version string. Such a host
+  is patched but still advertises `PHP/8.2.28`, so it shows up as
+  `LIKELY_EXPOSED`. Treat every hit as "verify the distro package", not
+  "confirmed vulnerable". The tool deliberately says *likely*, never
+  *vulnerable*, for this reason.
+- **Hidden versions cause "false negatives" in disguise.** Hardened servers set
+  `expose_php = Off`, so most real-world hosts emit no version. They land in
+  `INDETERMINATE` — which is **not** a clean bill of health, just an unknown. On
+  a real scan expect many `INDETERMINATE` rows and relatively few `confirmed`.
+- **Name-based virtual hosts / CDNs.** The scanner connects by IP without SNI,
+  so a shared-hosting IP or a CDN edge may answer with a default vhost (or
+  refuse TLS), giving the wrong banner or none. Pair the results with DNS data
+  for name-vhosted estates.
+- **Exposure ≠ exploitability.** This tool maps who is *likely* running
+  unpatched PHP. It does not and will not prove the RCE is reachable — that
+  requires the destructive OOM test this tool refuses to perform.
+
+In short: use it to **prioritise a patch campaign**, not to certify a host as
+safe or to publish a "vulnerable" label about anyone.
 
 ---
 
