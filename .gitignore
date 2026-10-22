@@ -1,0 +1,21 @@
+# Scan outputs
+*.jsonl
+*.csv
+*.json
+*.html
+!examples/*.html
+targets*.txt
+ips*.txt
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# OS / editors
+.DS_Store
+*.swp
+.idea/
+.vscode/
